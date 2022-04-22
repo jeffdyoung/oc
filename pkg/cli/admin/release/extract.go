@@ -98,6 +98,10 @@ func NewExtract(f kcmdutil.Factory, streams genericclioptions.IOStreams) *cobra.
 
 			# Extract cloud credential requests for AWS
 			oc adm release extract --credentials-requests --cloud=aws
+
+			# Extract a specific version and cpu architecture for a release and architecture
+			# Default architecture is amd64
+			oc adm release extract 4.10.8 --to=/tmp/example --arch=arm64
 		`),
 		Run: func(cmd *cobra.Command, args []string) {
 			kcmdutil.CheckErr(o.Complete(f, cmd, args))
@@ -107,6 +111,7 @@ func NewExtract(f kcmdutil.Factory, streams genericclioptions.IOStreams) *cobra.
 	flags := cmd.Flags()
 	o.SecurityOptions.Bind(flags)
 	o.ParallelOptions.Bind(flags)
+	o.ArchOptions.Bind(flags)
 
 	flags.StringVar(&o.From, "from", o.From, "Image containing the release payload.")
 	flags.StringVar(&o.File, "file", o.File, "Extract a single file from the payload to standard output.")
@@ -132,6 +137,7 @@ type ExtractOptions struct {
 
 	SecurityOptions imagemanifest.SecurityOptions
 	ParallelOptions imagemanifest.ParallelOptions
+	ArchOptions     ArchOptions
 
 	Output string
 
@@ -169,7 +175,10 @@ func (o *ExtractOptions) Complete(f kcmdutil.Factory, cmd *cobra.Command, args [
 	if len(o.From) > 0 {
 		args = []string{o.From}
 	}
-	args, err := findArgumentsFromCluster(f, args)
+	if err := o.ArchOptions.Validate(); err != nil {
+		return err
+	}
+	args, err := findArgumentsFromCluster(f, args, o.ArchOptions.Arch)
 	if err != nil {
 		return err
 	}

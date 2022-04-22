@@ -61,7 +61,7 @@ func NewInfoOptions(streams genericclioptions.IOStreams) *InfoOptions {
 func NewInfo(f kcmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	o := NewInfoOptions(streams)
 	cmd := &cobra.Command{
-		Use:   "info IMAGE [--changes-from=IMAGE] [--verify|--commits|--pullspecs]",
+		Use:   "info IMAGE [--changes-from=IMAGE] [--verify|--commits|--pullspecs|--arch=ARCH]",
 		Short: "Display information about a release",
 		Long: templates.LongDesc(`
 			Show information about an OpenShift release.
@@ -103,14 +103,17 @@ func NewInfo(f kcmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Com
 			# Show information about the cluster's current release
 			oc adm release info
 
+			# Search information about a specific architecture's release (default is amd64)
+			oc adm release info 4.10.0 --arch=ARCH
+
 			# Show the source code that comprises a release
-			oc adm release info 4.2.2 --commit-urls
+			oc adm release info 4.10.0 --commit-urls
 
 			# Show the source code difference between two releases
-			oc adm release info 4.2.0 4.2.2 --commits
+			oc adm release info 4.10.0 4.10.6 --commits
 
 			# Show where the images referenced by the release are located
-			oc adm release info quay.io/openshift-release-dev/ocp-release:4.2.2 --pullspecs
+			oc adm release info quay.io/openshift-release-dev/ocp-release:4.10.0 --pullspecs
 
 			# Show information about linux/s390x image
 			# Note: Wildcard filter is not supported. Pass a single os/arch to extract
@@ -127,12 +130,13 @@ func NewInfo(f kcmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Com
 	o.SecurityOptions.Bind(flags)
 	o.FilterOptions.Bind(flags)
 	o.ParallelOptions.Bind(flags)
+	o.ArchOptions.Bind(flags)
+
 	o.KubeTemplatePrintFlags.AddFlags(cmd)
 
 	flags.StringVar(&o.From, "changes-from", o.From, "Show changes from this image to the requested image.")
 
 	flags.BoolVar(&o.Verify, "verify", o.Verify, "Generate bug listings from the changelogs in the git repositories extracted to this path.")
-
 	flags.BoolVar(&o.ShowContents, "contents", o.ShowContents, "Display the contents of a release.")
 	flags.BoolVar(&o.ShowCommit, "commits", o.ShowCommit, "Display information about the source an image was created with.")
 	flags.BoolVar(&o.ShowCommitURL, "commit-urls", o.ShowCommitURL, "Display a link (if possible) to the source code.")
@@ -173,6 +177,7 @@ type InfoOptions struct {
 	ParallelOptions imagemanifest.ParallelOptions
 	SecurityOptions imagemanifest.SecurityOptions
 	FilterOptions   imagemanifest.FilterOptions
+	ArchOptions     ArchOptions
 }
 
 func findSemanticVersionArgs(args []string) map[string]semver.Version {
@@ -218,7 +223,7 @@ const defaultGraphURL = "https://api.openshift.com/api/upgrades_info/v1/graph"
 // replaceStableSemanticArgs attempts to look up known major versions in existing public stable
 // channels.
 // TODO: perfom graph lookups from the cluster's graph endpoint and channel in preference
-func replaceStableSemanticArgs(args []string, semanticArgs map[string]semver.Version, graphURL string) error {
+func replaceStableSemanticArgs(args []string, semanticArgs map[string]semver.Version, graphURL string, arch string) error {
 	if len(graphURL) == 0 {
 		graphURL = defaultGraphURL
 	}
@@ -249,7 +254,11 @@ func replaceStableSemanticArgs(args []string, semanticArgs map[string]semver.Ver
 
 		var found bool
 		for _, stream := range []string{"fast", "stable", "candidate"} {
-			u.RawQuery = url.Values{"channel": []string{fmt.Sprintf("%s-%d.%d", stream, v.Major, v.Minor)}}.Encode()
+			params := url.Values{"channel": []string{fmt.Sprintf("%s-%d.%d", stream, v.Major, v.Minor)}}
+			if arch != "" {
+				params.Add("arch", arch)
+			}
+			u.RawQuery = params.Encode()
 			if err := func() error {
 				req, err := http.NewRequest("GET", u.String(), nil)
 				if err != nil {
@@ -312,7 +321,6 @@ func replaceClusterSemanticArgs(f kcmdutil.Factory, args []string, semanticArgs 
 		}
 		return args, fmt.Errorf("info expects one argument, or a connection to an OpenShift 4.x server: %v", err)
 	}
-
 	if len(args) == 0 {
 		image := cv.Status.Desired.Image
 		if len(image) == 0 && cv.Spec.DesiredUpdate != nil {
@@ -339,23 +347,29 @@ func replaceClusterSemanticArgs(f kcmdutil.Factory, args []string, semanticArgs 
 	return args, nil
 }
 
-func findArgumentsFromCluster(f kcmdutil.Factory, args []string) ([]string, error) {
+func findArgumentsFromCluster(f kcmdutil.Factory, args []string, arch string) ([]string, error) {
 	semanticArgs := findSemanticVersionArgs(args)
 	if len(semanticArgs) == 0 && len(args) > 0 {
 		return args, nil
 	}
 	klog.V(4).Infof("Found semantic versions: %v", semanticArgs)
-	// attempt to find semantic args from the cluster
-	args, clusterErr := replaceClusterSemanticArgs(f, args, semanticArgs)
-	if len(semanticArgs) == 0 {
-		return args, clusterErr
-	}
-	// if any semantic args remain, try to fetch them from the api endpoint out of a stable channel
-	err := replaceStableSemanticArgs(args, semanticArgs, defaultGraphURL)
-	if len(semanticArgs) == 0 || err != nil {
-		if clusterErr != nil {
-			klog.V(2).Infof("Ignored error retrieving semantic versions from cluster version: %v", err)
+
+	//if arch isn't defined, attempt to find semantic args from the cluster
+	if arch == "" {
+		args, clusterErr := replaceClusterSemanticArgs(f, args, semanticArgs)
+
+		if len(semanticArgs) == 0 {
+			return args, clusterErr
 		}
+
+		// if any semantic args remain, try to fetch them from the api endpoint out of a stable channel
+		if clusterErr != nil {
+			klog.V(2).Infof("Ignored error retrieving semantic versions from cluster version: %v", clusterErr)
+		}
+	}
+	// Fetch semantic args from the api endpoint out of a stable channel
+	err := replaceStableSemanticArgs(args, semanticArgs, defaultGraphURL, arch)
+	if len(semanticArgs) == 0 || err != nil {
 		return args, err
 	}
 	// if there are any semantic args left, error
@@ -366,7 +380,13 @@ func findArgumentsFromCluster(f kcmdutil.Factory, args []string) ([]string, erro
 }
 
 func (o *InfoOptions) Complete(f kcmdutil.Factory, cmd *cobra.Command, args []string) error {
-	args, err := findArgumentsFromCluster(f, args)
+
+	if err := o.ArchOptions.Validate(); err != nil {
+		return err
+	}
+
+	// query cluster and then api.openshift.com for release image
+	args, err := findArgumentsFromCluster(f, args, o.ArchOptions.Arch)
 	if err != nil {
 		return err
 	}
